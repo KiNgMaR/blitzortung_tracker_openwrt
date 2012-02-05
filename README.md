@@ -22,3 +22,7 @@ Invoke `make`.
 
 The .ipk file will end up as `bin/<arch>/packages/blitzortung_tracker_<version>_<arch>.ipk`.
 
+## Init Script
+
+The init script is not yet part of the .ipk package file, so for now, you have to install it manually.
+
