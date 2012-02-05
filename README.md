@@ -1,6 +1,6 @@
 
 Package (.ipk file) building resources for the ToA Lightning Detection
-Tracker Program for OpenWrt.
+Tracker Program for OpenWrt. It has been tested with OpenWrt Backfire 10.03.1 stable.
 
 ## Building
 
