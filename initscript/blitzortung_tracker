@@ -1,0 +1,67 @@
+#!/bin/sh /etc/rc.common
+# (C) Copyright 2012 Ingmar Runge <ingmar@irsoft.de>
+
+START=97
+APP=blitzortung_tracker
+PID_FILE=/var/run/$APP.pid
+EXTRA_COMMANDS="check"
+EXTRA_HELP="        check Probes if the tracker is running and tries to start it if it isn't."
+
+blitzortung_start() {
+	local section="$1"
+
+	local enabled
+	config_get_bool enabled "${section}" enable 1
+	[ "${enabled}" -eq 0 ] && return 1
+
+	local GPS
+	local BAUDRATE
+	local SERIAL_DEVICE
+	local USERNAME
+	local PASSWORD
+
+	config_get GPS "${section}" gps
+	config_get BAUDRATE "${section}" baudrate
+	config_get SERIAL_DEVICE "${section}" device
+	config_get USERNAME "${section}" username
+	config_get PASSWORD "${section}" password
+
+	if [ "${SERIAL_DEVICE}" = "auto" ]; then
+		for f in $(echo "/dev/ttyUSB0 /dev/usb/tts/0 /dev/ttyUSB1 /dev/usb/tts/1" | tr " " "\n"); do
+			if [ -e "$f" ]; then
+				SERIAL_DEVICE=$f
+				break
+			fi
+		done
+	fi
+
+	[ ! -e "${SERIAL_DEVICE}" ] && echo "Serial device not found." && return 1
+	[ -z "${USERNAME}" ] && echo "Empty username." && return 1
+	[ -z "${PASSWORD}" ] && echo "Empty password." && return 1
+
+	start-stop-daemon -S -x /bin/$APP -p $PID_FILE -m -b -- -L $GPS $BAUDRATE $SERIAL_DEVICE $USERNAME $PASSWORD
+}
+
+start() {
+	config_load "${APP}"
+	config_foreach blitzortung_start blitzortung
+}
+
+stop() {
+	start-stop-daemon -K -p $PID_FILE -s TERM
+	rm -f $PID_FILE
+}
+
+check() {
+	if [ -e $PID_FILE ]; then
+		# check if process accepts signals / is running:
+		kill -0 `cat $PID_FILE` >/dev/null 2>&1
+		if [ $? -eq 0 ]; then
+			echo "Tracker running."
+			return
+		fi
+	fi
+
+	echo "Tracker not running, starting..."
+	start
+}
