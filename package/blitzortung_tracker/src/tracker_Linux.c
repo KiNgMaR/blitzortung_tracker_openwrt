@@ -1,16 +1,49 @@
 /*
     Copyright (C) 2003-2012  Egon Wanke <blitzortung@gmx.org>
 
-    This program sends the output of the evaluation boards as udp packets
-    to the servers of blitzortung.org. It supports firmware version 30a.
-    If there are any problem with this tracker program, contact me by
-    email to blitzortung@gmx.org.
+    This program sends the output of the evaluation board PCB 6 Version 8 or
+    higher as udp packets to the servers of blitzortung.org. It supports only
+    firmware version 30a or higher. If there are any problem with this tracker
+    program, please contact me by email to blitzortung@gmx.org.
  
     Name this file "tracker_Linux.c" and compile it by
     > g++ -Wall -lm -o tracker_Linux tracker_Linux.c
 
     then try
     > ./tracker_Linux -h
+
+    or
+    > ./tracker_Linux --help
+
+    Examples of the use:
+
+    > ./tracker_Linux -vi -vl -vo -vs - /dev/ttyS0 CharlyAU yzyzyzyz 2
+    This command writes sytstem information, log information, board output,
+    and sent UDP packets to standard output,
+    sets GPS speed to 4800 baud, does not initialize the GPS,
+    sets tracker speed to 115200 baud, and uses serial device = /dev/ttyS0,
+    username = CharlyAU, password = yzyzyzyz, and region = 2
+
+    > ./tracker_Linux -bg 9600 SiRF /dev/ttyUSB0 PeterPim aaaaaaaa 1
+    This command set GPS speed to 9600 baud, initializes the GPS with SiRF chipset,
+    sets tracker speed to 115200 baud, and uses serial device = /dev/ttyUSB0,
+    username = PeterPin, password = aaaaaaaa, and region = 1
+
+    > ./tracker_Linux -vi -ll tracker.log -bt 230400 - /dev/ttyS0 CharlyAU yzyzyzyz 2
+    This command outputs system information on standard output,
+    writes log information to file tracker.log,
+    sets GPS speed to 4800 baud, does not initialize the GPS,
+    sets tracker speed to 230400 baud, and uses serial device = /dev/ttyS0,
+    username = CharlyAU, password = yzyzyzyz, and region = 2
+
+    If you want to controll the GPS output, then turn the yellow jumpers of the
+    board by 90 degrees and type the following command:
+
+    > ./tracker_Linux -vo -bg 4800 SiRF /dev/ttyUSB0
+    This command outputs board output on standard output,
+    sets GPS speed to 4800 baud, intializes the GPS with SiRF chipset,
+    sets tracker speed to GPS speed (= 4800 baud),
+    and uses serial device = /dev/ttyUSB0
 
 */
 
@@ -155,9 +188,9 @@ struct logfile_type {
   FILE *fd; };
 
 struct logfiles_type {
-  logfile_type out;
-  logfile_type log;
-  logfile_type sent; } logfiles;
+  struct logfile_type out;
+  struct logfile_type log;
+  struct logfile_type sent; } logfiles;
 
 /******************************************************************************/
 /***** initialization strings for gps chip sets *******************************/
@@ -294,42 +327,22 @@ void write_log_message (const char *text)
 //
 void init_struct_serial_type ()
 {
-  int i;
   serial.tracker_baudrate= DEFAULT_TRACKER_BAUDRATE;
   serial.gps_baudrate= DEFAULT_GPS_BAUDRATE;
   serial.echo_device= NULL;
   serial.tracker_baudrates_string[0]= 0;
-#ifdef B115200
-  strcat (serial.tracker_baudrates_string, "115200, ");
-#endif
+  strcat (serial.tracker_baudrates_string, "115200");
 #ifdef B230400
-  strcat (serial.tracker_baudrates_string, "230400, ");
+  strcat (serial.tracker_baudrates_string, ", 230400");
 #endif
 #ifdef B25000
-  strcat (serial.tracker_baudrates_string, "250000, ");
+  strcat (serial.tracker_baudrates_string, ", 250000");
 #endif
 #ifdef B50000
-  strcat (serial.tracker_baudrates_string, "500000, ");
+  strcat (serial.tracker_baudrates_string, ", 500000");
 #endif
-  for (i=0; serial.tracker_baudrates_string[i] != 0; i++);
-  if (i > 1) {
-    serial.tracker_baudrates_string[i-2]= 0; }
   serial.gps_baudrates_string[0]= 0;
-#ifdef B4800
-  strcat (serial.gps_baudrates_string, "4800, ");
-#endif
-#ifdef B9600
-  strcat (serial.gps_baudrates_string, "9600, ");
-#endif
-#ifdef B19200
-  strcat (serial.gps_baudrates_string, "19200, ");
-#endif
-#ifdef B38400
-  strcat (serial.gps_baudrates_string, "38400, ");
-#endif
-  for (i=0; serial.gps_baudrates_string[i] != 0; i++);
-  if (i > 1) {
-    serial.gps_baudrates_string[i-2]= 0; }
+  strcat (serial.gps_baudrates_string, "4800, 9600, 19200, 38400");
 }
 
 //
@@ -450,26 +463,16 @@ void set_baudrate (int f, int baudrate)
   tio.c_iflag= IGNBRK;
   tio.c_oflag= 0;
   tio.c_cflag= CS8 | CLOCAL | CREAD;
-#ifdef B4800
   if (baudrate == 4800) {
     tio.c_cflag|= B4800; }
-#endif
-#ifdef B9600
   if (baudrate == 9600) {
     tio.c_cflag|= B9600; }
-#endif
-#ifdef B19200
   if (baudrate == 19200) {
     tio.c_cflag|= B19200; }
-#endif
-#ifdef B38400
   if (baudrate == 38400) {
     tio.c_cflag|= B38400; }
-#endif
-#ifdef B115200
   if (baudrate == 115200) {
     tio.c_cflag|= B115200; }
-#endif
 #ifdef B230400
   if (baudrate == 230400) {
     tio.c_cflag|= B230400; }
@@ -765,16 +768,16 @@ void evaluate (const char *line, int sock_id, struct sockaddr *serv_addr, const 
       average.alt= sum.alt/RING_BUFFER_SIZE;
 
       precision.S_counter= average.S_counter_difference-counter_difference;
-      precision.lat= S.lat-average.lat;
-      precision.lon= S.lon-average.lon;
+      precision.lat= fabsl(S.lat-average.lat);
+      precision.lon= fabsl(S.lon-average.lon);
       precision.alt= S.alt-average.alt;
       precision.PPS= (long double)precision.S_counter/(long double)average.S_counter_difference;
 
       C.accuracy_ok= (fabsl (precision.PPS) < PPS_PRECISION);
 
-      C.pos_ok= (fabsl (precision.lat) + fabsl (precision.lon) < POS_PRECISION);
+      C.pos_ok= (precision.lat+precision.lon < POS_PRECISION);
 
-      if (C.pos_ok) {
+      if (last_C.pos_ok) {
         S.average_lat= (S.average_lat*(SMOOTH_FACTOR-1)+average.lat)/SMOOTH_FACTOR;
         S.average_lon= (S.average_lon*(SMOOTH_FACTOR-1)+average.lon)/SMOOTH_FACTOR;
         S.average_alt= (S.average_alt*(SMOOTH_FACTOR-1)+average.alt)/SMOOTH_FACTOR; }
@@ -865,7 +868,25 @@ int main (int argc, char **argv)
       flag_found= true;
       serial.tracker_baudrate= atoi(argv[1]);
       argc-=2;
-      argv+=2; }
+      argv+=2;
+#ifndef B230400
+      if (serial.tracker_baudrate == 230400) {
+        fprintf (stderr, "Baudrate 230400 not possible with your hardware/driver, use %s!\n", serial.tracker_baudrates_string);
+        exit (EXIT_FAILURE); }
+#endif
+#ifndef B250000
+      if (serial.tracker_baudrate == 250000) {
+        fprintf (stderr, "Baudrate 250000 not possible with your hardware/driver, use %s!\n", serial.tracker_baudrates_string);
+        exit (EXIT_FAILURE); }
+#endif
+#ifndef B500000
+      if (serial.tracker_baudrate == 500000) {
+        fprintf (stderr, "Baudrate 500000 not possible with your hardware/driver, use %s!\n", serial.tracker_baudrates_string);
+        exit (EXIT_FAILURE); }
+#endif
+      if ((serial.tracker_baudrate != 115200)&&(serial.tracker_baudrate != 230400)&&(serial.tracker_baudrate != 250000)&&(serial.tracker_baudrate != 500000)) {
+        fprintf (stderr, "Baudrate %d not possible with your hardware/driver, user %s\n!", serial.tracker_baudrate, serial.tracker_baudrates_string);
+        exit (EXIT_FAILURE); } }
     if ((argc > 0) && ((strcmp (argv[0],"-bg") == 0)||(strcmp (argv[0],"--gps_baudrate") == 0))) {
       flag_found= true;
       serial.gps_baudrate= atoi(argv[1]);
@@ -1089,4 +1110,3 @@ int main (int argc, char **argv)
 
   exit(EXIT_SUCCESS);
 }
-
