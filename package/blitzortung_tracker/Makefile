@@ -5,7 +5,7 @@ include $(TOPDIR)/rules.mk
 TARGET_LDFLAGS+=-rpath-link $(shell find $(STAGING_DIR) -name ld-uClibc.so.0)
 
 PKG_NAME:=blitzortung_tracker
-PKG_VERSION:=24
+PKG_VERSION:=25
 PKG_RELEASE:=1
 
 PKG_BUILD_DIR := $(BUILD_DIR)/$(PKG_NAME)
