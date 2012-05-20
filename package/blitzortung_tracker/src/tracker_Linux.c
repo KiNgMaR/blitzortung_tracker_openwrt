@@ -31,17 +31,17 @@
     sets tracker speed to 115200 baud, and uses serial device = /dev/ttyUSB0,
     username = PeterPin, password = aaaaaaaa, and region = 1
 
-    > ./tracker_Linux -vi -ll tracker.log -bt 230400 - /dev/ttyS0 CharlyAU yzyzyzyz 2
+    > ./tracker_Linux -vi -ll tracker.log -bt 500000 - /dev/ttyS0 CharlyAU yzyzyzyz 2
     This command outputs system information on standard output,
     writes log information to file tracker.log,
     sets GPS speed to 4800 baud, does not initialize the GPS,
-    sets tracker speed to 230400 baud, and uses serial device = /dev/ttyS0,
+    sets tracker speed to 500000 baud, and uses serial device = /dev/ttyS0,
     username = CharlyAU, password = yzyzyzyz, and region = 2
 
     If you want to controll the GPS output, then turn the yellow jumpers of the
     board by 90 degrees and type the following command:
 
-    > ./tracker_Linux -vo -bg 4800 SiRF /dev/ttyUSB0
+    > ./tracker_Linux -vo -bg 4800 -bt 4800 SiRF /dev/ttyUSB0
     This command outputs board output on standard output,
     sets GPS speed to 4800 baud, intializes the GPS with SiRF chipset,
     sets tracker speed to GPS speed (= 4800 baud),
@@ -105,8 +105,8 @@ long double fabsl (long double x); // only necessary for OpenWrt,
 #define VERSION                 "LT&nbsp;25-OpenWrt"   // version string send to server
 #define SERVER_ADDR_1           "rechenserver.de"      // server address region 1
 #define SERVER_ADDR_2           "rechenserver.com"     // server address region 2
-#define SERVER_ADDR_3           "rechenserver.com"     // server address region 3
-#define SERVER_ADDR_4           "rechenserver.com"     // server address region 4
+#define SERVER_ADDR_3           "rechenserver.org"     // server address region 3
+#define SERVER_ADDR_4           "rechenserver.org"     // server address region 3
 #define SERVER_PORT             8308                   // server port
 
 const char *server_addr[]= {"0.0.0.0", SERVER_ADDR_1, SERVER_ADDR_2, SERVER_ADDR_3, SERVER_ADDR_4};
@@ -357,14 +357,14 @@ void init_struct_serial_type ()
   serial.echo_device= NULL;
   serial.tracker_baudrates_string[0]= 0;
   strcat (serial.tracker_baudrates_string, "4800, 9600, 19200, 38400, 115200");
-#ifdef B230400
-  strcat (serial.tracker_baudrates_string, ", 230400");
-#endif
-#ifdef B25000
+#ifdef B250000
   strcat (serial.tracker_baudrates_string, ", 250000");
 #endif
-#ifdef B50000
+#ifdef B500000
   strcat (serial.tracker_baudrates_string, ", 500000");
+#endif
+#ifdef B2500000
+  strcat (serial.tracker_baudrates_string, ", 2500000");
 #endif
   serial.gps_baudrates_string[0]= 0;
   strcat (serial.gps_baudrates_string, "4800, 9600, 19200, 38400");
@@ -498,10 +498,6 @@ void set_baudrate (int f, int baudrate)
     tio.c_cflag|= B38400; }
   if (baudrate == 115200) {
     tio.c_cflag|= B115200; }
-#ifdef B230400
-  if (baudrate == 230400) {
-    tio.c_cflag|= B230400; }
-#endif
 #ifdef B250000
   if (baudrate == 250000) {
     tio.c_cflag|= B250000; }
@@ -509,6 +505,10 @@ void set_baudrate (int f, int baudrate)
 #ifdef B500000
   if (baudrate == 500000) {
     tio.c_cflag|= B500000; }
+#endif
+#ifdef B2500000
+  if (baudrate == 2500000) {
+    tio.c_cflag|= B2500000; }
 #endif
   tio.c_lflag= 0;
   tio.c_cc[VTIME]= 0;
@@ -968,11 +968,6 @@ int main (int argc, char **argv)
       serial.tracker_baudrate= atoi(argv[1]);
       argc-=2;
       argv+=2;
-#ifndef B230400
-      if (serial.tracker_baudrate == 230400) {
-        fprintf (stderr, "Baudrate 230400 not possible with your hardware/driver, use %s!\n", serial.tracker_baudrates_string);
-        exit (EXIT_FAILURE); }
-#endif
 #ifndef B250000
       if (serial.tracker_baudrate == 250000) {
         fprintf (stderr, "Baudrate 250000 not possible with your hardware/driver, use %s!\n", serial.tracker_baudrates_string);
@@ -983,14 +978,19 @@ int main (int argc, char **argv)
         fprintf (stderr, "Baudrate 500000 not possible with your hardware/driver, use %s!\n", serial.tracker_baudrates_string);
         exit (EXIT_FAILURE); }
 #endif
+#ifndef B2500000
+      if (serial.tracker_baudrate == 2500000) {
+        fprintf (stderr, "Baudrate 2500000 not possible with your hardware/driver, use %s!\n", serial.tracker_baudrates_string);
+        exit (EXIT_FAILURE); }
+#endif
       if ((serial.tracker_baudrate != 4800)&&
           (serial.tracker_baudrate != 9600)&&
           (serial.tracker_baudrate != 19200)&&
           (serial.tracker_baudrate != 38400)&&
           (serial.tracker_baudrate != 115200)&&
-          (serial.tracker_baudrate != 230400)&&
           (serial.tracker_baudrate != 250000)&&
-          (serial.tracker_baudrate != 500000)) {
+          (serial.tracker_baudrate != 500000)&&
+          (serial.tracker_baudrate != 2500000)) {
         fprintf (stderr, "Baudrate %d not possible with your hardware/driver, user %s\n!", serial.tracker_baudrate, serial.tracker_baudrates_string);
         exit (EXIT_FAILURE); } }
     if ((argc > 0) && ((strcmp (argv[0],"-bg") == 0)||(strcmp (argv[0],"--gps_baudrate") == 0))) {
@@ -1147,10 +1147,11 @@ int main (int argc, char **argv)
     sprintf (buf, "open (%s, O_RDWR | O_NOCTTY )", serial.device);
     perror (buf);
     exit (EXIT_FAILURE); }
+  set_baudrate (f, serial.tracker_baudrate);
 
-  char c;
+  unsigned char c;
+
   if (argc == 2) {
-    set_baudrate (f, serial.gps_baudrate);
 
     while (true) {
       if (read (f, &c, 1) == 1) {
@@ -1163,7 +1164,6 @@ int main (int argc, char **argv)
           fflush (logfiles.out.fd); } } } }
 
   else {
-    set_baudrate (f, serial.tracker_baudrate);
 
     int sock_id= socket (AF_INET, SOCK_DGRAM, 0);
     if (sock_id == -1) {
