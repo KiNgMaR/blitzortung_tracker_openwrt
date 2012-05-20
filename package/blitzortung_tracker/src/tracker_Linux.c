@@ -1391,11 +1391,7 @@ int main (int argc, char **argv)
 					close (tcp_echo.conn_s);
 				}
 				tcp_echo.conn_s = conn_s;
-				sprintf (buf, "WELCOME: " VERSION "\n");
-				if (send (tcp_echo.conn_s, buf, strlen(buf), MSG_NOSIGNAL) < 0) {
-					close (tcp_echo.conn_s);
-					tcp_echo.conn_s = 0;
-				}
+				write_tcp_message ("WELCOME", VERSION);
 			}
 		}
 	} }
