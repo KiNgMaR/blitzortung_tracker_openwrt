@@ -209,6 +209,14 @@ struct serial_type {
   char tracker_baudrates_string[INFO_BUFFER_SIZE];
   char gps_baudrates_string[INFO_BUFFER_SIZE]; } serial;
 
+//
+struct tcp_echo_type {
+	bool enabled;
+	struct sockaddr_in servaddr;
+	int list_s;
+	int conn_s;
+} tcp_echo;
+
 #define DEFAULT_TRACKER_BAUDRATE        115200
 #define DEFAULT_GPS_BAUDRATE            4800
 
@@ -327,6 +335,25 @@ long long ensec_time ()
 }
 
 /******************************************************************************/
+/***** write message to tcp echo socket file **********************************/
+/******************************************************************************/
+
+void write_tcp_message (const char *type, const char *data)
+{
+	if (!tcp_echo.enabled || !tcp_echo.conn_s)
+		return;
+
+	char buf [STRING_BUFFER_SIZE + 30];
+
+	sprintf (buf, "%s: %s\n", type, data);
+
+	if (send (tcp_echo.conn_s, buf, strlen(buf), 0) < 0) {
+		close (tcp_echo.conn_s);
+		tcp_echo.conn_s = 0;
+	}
+}
+
+/******************************************************************************/
 /***** write log message to log file ******************************************/
 /******************************************************************************/
 
@@ -349,6 +376,8 @@ void write_log_message (const char *text)
     openlog ("blitzortung", LOG_CONS|LOG_PID, LOG_USER);
     syslog (LOG_INFO, "%s", text);
     closelog (); }
+
+  write_tcp_message ("LOG", text);
 }
 
 /******************************************************************************/
@@ -427,6 +456,16 @@ void init_struct_C_type ()
   C.pos_ok= false;
   C.checksum_ok= false;
   C.faulty= false;
+}
+
+//
+// initialize tcp_echo type
+//
+void init_struct_tcp_echo_type ()
+{
+  memset (&tcp_echo, 0, sizeof (tcp_echo));
+  tcp_echo.servaddr.sin_family = AF_INET;
+  tcp_echo.servaddr.sin_addr.s_addr = INADDR_NONE;
 }
 
 //
@@ -667,6 +706,8 @@ void send_strike (int sock_id, struct sockaddr *serv_addr, const char *username,
   if (logfiles.sent.name != NULL) {
     fprintf (logfiles.sent.fd, "%s", buf);
     fflush (logfiles.sent.fd); }
+
+  write_tcp_message ("SIGSENT", buf);
 }
 
 /******************************************************************************/
@@ -864,9 +905,14 @@ void evaluate (const char *line, const char *username, const char *password)
 
       log_status();
 
-      if (flag.verbose_info) {
-        printf ("%Ld lat: %+.6Lf, lon: %+.6Lf, alt: %+.1Lf, acc: %+.0Lf nsec, sat: %d\n", counter_difference, S.average_lat, S.average_lon, S.average_alt, precision.PPS*1000000000.0l, S.satellites);
-        fflush (stdout); }
+      if (flag.verbose_info || tcp_echo.enabled) {
+        sprintf (buf, "%Ld lat: %+.6Lf, lon: %+.6Lf, alt: %+.1Lf, acc: %+.0Lf nsec, sat: %d\n", counter_difference, S.average_lat, S.average_lon, S.average_alt, precision.PPS*1000000000.0l, S.satellites);
+		if (flag.verbose_info) {
+			fputs (buf, stdout);
+			fflush (stdout);
+		}
+		write_tcp_message ("INFO", buf);
+	  }
 
       long long time= ensec_time ();
       if ((C.accuracy_ok)&&(C.pos_ok)&&(C.seconds_flow_ok)&&
@@ -972,6 +1018,7 @@ int main (int argc, char **argv)
   init_struct_logfile_type ();
   init_struct_S_type ();
   init_struct_C_type ();
+  init_struct_tcp_echo_type ();
 
   bool flag_found;
   do {
@@ -1068,6 +1115,16 @@ int main (int argc, char **argv)
       add_server_port= atoi(argv [1]);
       argc-=2;
       argv+=2; }
+    if ((argc > 0) && ((strcmp (argv[0], "-ta") == 0)||(strcmp (argv[0],"--tcp_echo_addr") == 0))) {
+      flag_found= true;
+      tcp_echo.servaddr.sin_addr.s_addr = inet_addr (argv [1]);
+      argc-=2;
+      argv+=2; }
+    if ((argc > 0) && ((strcmp (argv[0], "-tp") == 0)||(strcmp (argv[0],"--tcp_echo_port") == 0))) {
+      flag_found= true;
+      tcp_echo.servaddr.sin_port= htons(atoi(argv [1]));
+      argc-=2;
+      argv+=2; }
     if ((argc > 0) && ((strcmp (argv[0], "-s") == 0)||(strcmp (argv[0],"--SBAS") == 0))) {
       flag_found= true;
       flag.SBAS= true;
@@ -1113,6 +1170,10 @@ int main (int argc, char **argv)
     fprintf (stderr, "                   alternative: --add_server\n");
     fprintf (stderr, "-ap udp_port     : port for additional UDP server\n");
     fprintf (stderr, "                   alternative: --add_port\n");
+    fprintf (stderr, "-ta addr         : enable TCP echo server at IPv4 addr\n");
+    fprintf (stderr, "                   alternative: --tcp_echo_addr addr\n");
+    fprintf (stderr, "-tp port         : enable TCP echo server at port\n");
+    fprintf (stderr, "                   alternative: --tcp_echo_port port\n");
     fprintf (stderr, "-s               : activate SBAS (WAAS/EGNOS/MSAS) support\n");
     fprintf (stderr, "                   alternative: --SBAS\n");
     fprintf (stderr, "-h               : print this help text\n");
@@ -1169,6 +1230,34 @@ int main (int argc, char **argv)
       perror (buf);
       exit (EXIT_FAILURE); }
     set_baudrate (e, serial.tracker_baudrate); }
+
+//
+  if (tcp_echo.servaddr.sin_addr.s_addr != INADDR_NONE && tcp_echo.servaddr.sin_port > 0) {
+	sprintf (buf, "enabling TCP echo at port %d\n", tcp_echo.servaddr.sin_port);
+	write_log_message (buf);
+
+	tcp_echo.list_s = socket (PF_INET, SOCK_STREAM, IPPROTO_TCP);
+
+	if (tcp_echo.list_s < 0) {
+		write_log_message ("TCP echo: error creating socket");
+	} else {
+		if (bind (tcp_echo.list_s, (struct sockaddr*) &tcp_echo.servaddr, sizeof(tcp_echo.servaddr)) < 0) {
+			write_log_message ("TCP echo: error calling bind()");
+			close (tcp_echo.list_s);
+		} else {
+			if (listen (tcp_echo.list_s, SOMAXCONN) < 0) {
+				write_log_message ("TCP echo: error calling listen()");
+				close (tcp_echo.list_s);
+			} else {
+				tcp_echo.enabled = true;
+
+				// accept() must not block:
+				int flags = fcntl (tcp_echo.list_s, F_GETFL, 0);
+				fcntl (tcp_echo.list_s, F_SETFL, flags | O_NONBLOCK);
+			}
+		}
+	}
+  }
 
 //
   int f= open (serial.device, O_RDWR | O_NOCTTY );
@@ -1291,8 +1380,25 @@ int main (int argc, char **argv)
             i++; }
           if (c == '\n') {
             buf [i]= 0;
+	    write_tcp_message ("BOARD", buf);
             evaluate (buf, username, password);
-            i= 0; } } } } }
+            i= 0; } } }
+		if (tcp_echo.enabled) {
+			int conn_s = accept (tcp_echo.list_s, NULL, NULL);
+			if (conn_s > 0) {
+				if (tcp_echo.conn_s != 0) {
+					// close a previous connection
+					close (tcp_echo.conn_s);
+				}
+				tcp_echo.conn_s = conn_s;
+				sprintf (buf, "WELCOME: " VERSION "\n");
+				if (send (tcp_echo.conn_s, buf, strlen(buf), 0) < 0) {
+					close (tcp_echo.conn_s);
+					tcp_echo.conn_s = 0;
+				}
+			}
+		}
+	} }
 
   close (e);
   close (f);
