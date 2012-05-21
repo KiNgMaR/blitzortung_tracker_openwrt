@@ -102,23 +102,26 @@ long double fabsl (long double x); // only necessary for OpenWrt,
 /******************************************************************************/
 /******************************************************************************/
 
-#define VERSION                 "LT&nbsp;25-OpenWrt"   // version string send to server
+#define VERSION                 "LT&nbsp;26-OpenWrt"   // version string send to server
 #define SERVER_ADDR_1           "rechenserver.de"      // server address region 1
 #define SERVER_ADDR_2           "rechenserver.com"     // server address region 2
 #define SERVER_ADDR_3           "rechenserver.org"     // server address region 3
-#define SERVER_ADDR_4           "rechenserver.org"     // server address region 3
+#define SERVER_ADDR_4           "rechenserver.com"     // server address region 4
 #define SERVER_PORT             8308                   // server port
 
 const char *server_addr[]= {"0.0.0.0", SERVER_ADDR_1, SERVER_ADDR_2, SERVER_ADDR_3, SERVER_ADDR_4};
+char *add_server_addr;
+int add_server_port= SERVER_PORT;
 
 #define STRING_BUFFER_SIZE      2048                   // maximal buffer size for the strings we use to receive UDP packets
 #define INFO_BUFFER_SIZE        128                    // maximal buffer size for the strings we use elsewhere
 #define RING_BUFFER_SIZE        20                     // ring buffer size for averaged computation of counter difference
 #define SMOOTH_FACTOR           3600                   // average of 3600 seconds
 #define POS_PRECISION           0.001000l              // position precision in degree to reach before sending data
-#define PPS_PRECISION           0.000001l              // pulse precision to reach before sending data
+#define ALT_PRECISION           20.0l                  // altitude precision in meter to reach before sending data
+#define PPS_PRECISION           0.000001l              // pulse precision to reach before sending -l
 
-#define MAX_NONZERO_SEC         10                     // maximal number of consecutive seconds with strikes
+#define MAX_NONZERO_SEC         60                     // maximal number of consecutive seconds with strikes
 
 /******************************************************************************/
 /******************************************************************************/
@@ -130,6 +133,7 @@ struct flag_type {
   bool verbose_log;
   bool verbose_sent;
   bool verbose_info;
+  bool add_server;
   bool SBAS;
   bool syslog;
   bool help; } flag;
@@ -216,6 +220,9 @@ struct logfiles_type {
   struct logfile_type out;
   struct logfile_type log;
   struct logfile_type sent; } logfiles;
+
+int sock_id, add_sock_id;
+struct sockaddr_in serv_addr, add_serv_addr;
 
 /******************************************************************************/
 /***** initialization strings for gps chip sets *******************************/
@@ -714,7 +721,7 @@ void log_status ()
 //
 // evaluate received line
 //
-void evaluate (const char *line, int sock_id, struct sockaddr *serv_addr, const char *username, const char *password)
+void evaluate (const char *line, const char *username, const char *password)
 {
   int year, mon, day, min, hour, sec= 0, lat_deg, lon_deg, satellites= 0, no_param= 0;
   long double lat_min, lon_min, alt= 0.0l;
@@ -829,12 +836,13 @@ void evaluate (const char *line, int sock_id, struct sockaddr *serv_addr, const 
       precision.S_counter= average.S_counter_difference-counter_difference;
       precision.lat= fabsl(S.lat-average.lat);
       precision.lon= fabsl(S.lon-average.lon);
-      precision.alt= S.alt-average.alt;
+      precision.alt= fabsl(S.alt-average.alt);
       precision.PPS= (long double)precision.S_counter/(long double)average.S_counter_difference;
 
       C.accuracy_ok= (fabsl (precision.PPS) < PPS_PRECISION);
 
-      C.pos_ok= (precision.lat+precision.lon < POS_PRECISION);
+      C.pos_ok= ((precision.lat+precision.lon < POS_PRECISION)&&
+                 (precision.alt < ALT_PRECISION));
 
       if (last_C.pos_ok) {
         S.average_lat= (S.average_lat*(SMOOTH_FACTOR-1)+average.lat)/SMOOTH_FACTOR;
@@ -866,7 +874,9 @@ void evaluate (const char *line, int sock_id, struct sockaddr *serv_addr, const 
         L.values= 0;
         L.bits= nonzero_sec;
         strcpy (L.data, "-");
-        send_strike (sock_id, serv_addr, username, password);
+        send_strike (sock_id, (struct sockaddr *)&serv_addr, username, password);
+        if (flag.add_server) {
+          send_strike (add_sock_id, (struct sockaddr *)&add_serv_addr, username, password); }
         last_transmission_time= time; }
 
       strikes_per_sec= 0; } }
@@ -935,7 +945,9 @@ void evaluate (const char *line, int sock_id, struct sockaddr *serv_addr, const 
 
       L.nsec= (long long)(counter_difference*RING_BUFFER_SIZE*1000000000ll)/sum.S_counter_difference;
 
-      send_strike (sock_id, serv_addr, username, password);
+      send_strike (sock_id, (struct sockaddr *)&serv_addr, username, password);
+      if (flag.add_server) {
+        send_strike (add_sock_id, (struct sockaddr *)&add_serv_addr, username, password); }
       last_transmission_time= ensec_time (); } }
 }
 
@@ -1043,6 +1055,12 @@ int main (int argc, char **argv)
       serial.echo_device= argv [1];
       argc-=2;
       argv+=2; }
+    if ((argc > 0) && ((strcmp (argv[0], "-as") == 0)||(strcmp (argv[0],"--add_server") == 0))) {
+      flag_found= true;
+      flag.add_server= true;
+      add_server_addr= argv [1];
+      argc-=2;
+      argv+=2; }
     if ((argc > 0) && ((strcmp (argv[0], "-s") == 0)||(strcmp (argv[0],"--SBAS") == 0))) {
       flag_found= true;
       flag.SBAS= true;
@@ -1084,6 +1102,10 @@ int main (int argc, char **argv)
     fprintf (stderr, "                   alternative: --verbose_sent\n");
     fprintf (stderr, "-e serial_device : serial device for input echo\n");
     fprintf (stderr, "                   alternative: --echo serial_device\n");
+    fprintf (stderr, "-as udp_server   : additional UDP server\n");
+    fprintf (stderr, "                   alternative: --add_server\n");
+    fprintf (stderr, "-ap udp_port     : port for additional UDP server\n");
+    fprintf (stderr, "                   alternative: --add_port\n");
     fprintf (stderr, "-s               : activate SBAS (WAAS/EGNOS/MSAS) support\n");
     fprintf (stderr, "                   alternative: --SBAS\n");
     fprintf (stderr, "-h               : print this help text\n");
@@ -1165,12 +1187,11 @@ int main (int argc, char **argv)
 
   else {
 
-    int sock_id= socket (AF_INET, SOCK_DGRAM, 0);
+    sock_id= socket (AF_INET, SOCK_DGRAM, 0);
     if (sock_id == -1) {
       perror ("socket (AF_INET, SOCK_DGRAM, 0)");
       exit (EXIT_FAILURE); }
 
-    struct sockaddr_in serv_addr;
     serv_addr.sin_family= AF_INET;
     serv_addr.sin_port= htons (SERVER_PORT);
     serv_addr.sin_addr.s_addr= inet_addr (server_addr[region]);
@@ -1182,12 +1203,12 @@ int main (int argc, char **argv)
         sprintf (buf, "gethostbyname (%s) failed, try again in 10 seconds!\n", server_addr[region]);
         write_log_message (buf);
         sleep (10);
-        struct hostent *host_info= gethostbyname (server_addr[region]);
+        host_info= gethostbyname (server_addr[region]);
         if (host_info == NULL) {
           sprintf (buf, "gethostbyname (%s) failed, try again in 60 seconds!\n", server_addr[region]);
           write_log_message (buf);
           sleep (10);
-          struct hostent *host_info= gethostbyname (server_addr[region]);
+          host_info= gethostbyname (server_addr[region]);
           if (host_info == NULL) {
             sprintf (buf, "gethostbyname (%s) failed, give up, please check your internet connection!\n", server_addr[region]);
             write_log_message (buf);
@@ -1196,6 +1217,39 @@ int main (int argc, char **argv)
             close (sock_id);
             exit (EXIT_FAILURE); } } }
        memcpy((char*) &serv_addr.sin_addr.s_addr, host_info->h_addr, host_info->h_length); }
+
+    add_sock_id= socket (AF_INET, SOCK_DGRAM, 0);
+
+    if (flag.add_server) {
+      if (add_sock_id == -1) {
+        perror ("socket (AF_INET, SOCK_DGRAM, 0)");
+        exit (EXIT_FAILURE); }
+
+      add_serv_addr.sin_family= AF_INET;
+      add_serv_addr.sin_port= htons (add_server_port);
+      add_serv_addr.sin_addr.s_addr= inet_addr (add_server_addr);
+
+      if (add_serv_addr.sin_addr.s_addr == INADDR_NONE) {
+        /* host not given by IP but by name */
+        struct hostent *add_host_info= gethostbyname (add_server_addr);
+        if (add_host_info == NULL) {
+          sprintf (buf, "gethostbyname (%s) failed, try again in 10 seconds!\n", add_server_addr);
+          write_log_message (buf);
+          sleep (10);
+          add_host_info= gethostbyname (add_server_addr);
+          if (add_host_info == NULL) {
+            sprintf (buf, "gethostbyname (%s) failed, try again in 60 seconds!\n", add_server_addr);
+            write_log_message (buf);
+            sleep (10);
+            add_host_info= gethostbyname (add_server_addr);
+            if (add_host_info == NULL) {
+              sprintf (buf, "gethostbyname (%s) failed, give up, please check your internet connection!\n", add_server_addr);
+              write_log_message (buf);
+              sprintf (buf, "gethostbyname (%s)",add_server_addr);
+              perror (buf);
+              close (sock_id);
+              exit (EXIT_FAILURE); } } }
+         memcpy((char*) &add_serv_addr.sin_addr.s_addr, add_host_info->h_addr, add_host_info->h_length); } }
 
     int i=0;
 
@@ -1230,7 +1284,7 @@ int main (int argc, char **argv)
             i++; }
           if (c == '\n') {
             buf [i]= 0;
-            evaluate (buf, sock_id, (struct sockaddr *)&serv_addr, username, password);
+            evaluate (buf, username, password);
             i= 0; } } } } }
 
   close (e);
