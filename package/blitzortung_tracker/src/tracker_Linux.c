@@ -134,6 +134,7 @@ struct flag_type {
   bool verbose_sent;
   bool verbose_info;
   bool add_server;
+  bool add_port;
   bool SBAS;
   bool syslog;
   bool help; } flag;
@@ -1059,6 +1060,12 @@ int main (int argc, char **argv)
       flag_found= true;
       flag.add_server= true;
       add_server_addr= argv [1];
+      argc-=2;
+      argv+=2; }
+    if ((argc > 0) && ((strcmp (argv[0], "-ap") == 0)||(strcmp (argv[0],"--add_port") == 0))) {
+      flag_found= true;
+      flag.add_port= true;
+      add_server_port= atoi(argv [1]);
       argc-=2;
       argv+=2; }
     if ((argc > 0) && ((strcmp (argv[0], "-s") == 0)||(strcmp (argv[0],"--SBAS") == 0))) {
