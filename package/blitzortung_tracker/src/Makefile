@@ -1,13 +1,13 @@
 # Source: http://www.gargoyle-router.com/wiki/doku.php?id=openwrt_coding
 
-CFLAGS := -std=c99 -Wall -lm -Dbool=int -Dfalse=0 -Dtrue=1 -D_GNU_SOURCE $(CFLAGS)
+CFLAGS := -std=c99 -Wall -lm -lpthread -Dbool=int -Dfalse=0 -Dtrue=1 -D_GNU_SOURCE -DADDVERSION=\"OpenWrt\" $(CFLAGS)
 
-tracker: tracker_Linux.o
-	$(CC) $(CFLAGS) $(LDFLAGS) tracker_Linux.o -o tracker_Linux
+tracker: blitzortung_tracker.o
+	$(CC) $(CFLAGS) $(LDFLAGS) blitzortung_tracker.o -o blitzortung_tracker
 
-tracker_Linux.o: tracker_Linux.c
-	$(CC) $(CFLAGS) $(CFLAGS) -c tracker_Linux.c
+blitzortung_tracker.o: blitzortung_tracker.c
+	$(CC) $(CFLAGS) $(CFLAGS) -c blitzortung_tracker.c
 
 clean:
-	rm *.o tracker_Linux
+	rm *.o blitzortung_tracker
 

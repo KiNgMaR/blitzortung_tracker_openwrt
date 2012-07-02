@@ -5,7 +5,7 @@ include $(TOPDIR)/rules.mk
 TARGET_LDFLAGS+=-rpath-link $(shell find $(STAGING_DIR) -name ld-uClibc.so.0)
 
 PKG_NAME:=blitzortung_tracker
-PKG_VERSION:=26
+PKG_VERSION:=XLT1
 PKG_RELEASE:=1
 
 PKG_BUILD_DIR := $(BUILD_DIR)/$(PKG_NAME)
@@ -30,7 +30,7 @@ endef
 
 define Package/blitzortung_tracker/install
 	$(INSTALL_DIR) $(1)/bin
-	$(INSTALL_BIN) $(PKG_BUILD_DIR)/tracker_Linux $(1)/bin/blitzortung_tracker
+	$(INSTALL_BIN) $(PKG_BUILD_DIR)/blitzortung_tracker $(1)/bin/blitzortung_tracker
 endef
 
 $(eval $(call BuildPackage,blitzortung_tracker))
