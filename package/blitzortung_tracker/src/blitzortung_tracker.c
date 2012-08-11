@@ -12,7 +12,7 @@
      Linux
     =======
     Name this file "blitzortung_tracker.c" and compile it by
-    > g++ -Wall -lm -lpthread -o blitzortung_tracker blitzortung_tracker.c
+    > g++ -Wall -lm -pthread -o blitzortung_tracker blitzortung_tracker.c
 
 
      OpenWRT
@@ -121,7 +121,7 @@
 /******************************************************************************/
 
 //General
-#define VERSION                 "1"                    // version string send to server; no white spaces; linux/windows-info included automatically
+#define VERSION                 "3"                    // version string send to server; no white spaces; linux/windows-info included automatically
 #define SERVER_ADDR_1           "rechenserver.de"      // server address region 1
 #define SERVER_ADDR_2           "rechenserver.com"     // server address region 2
 #define SERVER_ADDR_3           "rechenserver.org"     // server address region 3
@@ -143,6 +143,7 @@
 #define RING_BUFFER_SIZE        30                     // ring buffer size for averaged computation of counter difference
 #define BUFFERD_SIGNALS         20                     // how much signals should we save (used for http output)
 #define BAUDRATES               10                     // number of different baudrates
+#define SERIAL_READ_BUFFER      128                    // buffer for storing serial data (needed for cygwin)
 
 
 //Default Baudrates
@@ -214,8 +215,12 @@
 /******************************************************************************/
 /******************************************************************************/
 
-//Use thread safe functions!
+//Use thread safe functions when needed!
+#ifndef SIMPLE_TRACKER
+#ifndef _REENTRANT
 #define _REENTRANT
+#endif
+#endif
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -262,7 +267,7 @@ struct server_type
 	int sock_id;
 	struct sockaddr_in serv_addr;
 	long long bytes_sent;
-} MainServer, AddServer, ExtraServer;
+} Server[3];
 
 
 //
@@ -469,7 +474,8 @@ struct param_type
 	int signal_check_bytes;
 	int param_update_sec;
 	int filter_enable;
-
+	int send_board_output;
+	
 	char extra_server_addr[INFO_BUFFER_SIZE + 1];
 	int  extra_server_port;
 	char extra_server_username[INFO_BUFFER_SIZE + 1];
@@ -526,6 +532,12 @@ const char *server_addr[] = {"0.0.0.0", SERVER_ADDR_1, SERVER_ADDR_2, SERVER_ADD
 int server_port[] = {0, SERVER_PORT_1, SERVER_PORT_2, SERVER_PORT_3, SERVER_PORT_4};
 int ring_buffer_index = 0;
 
+#if SERIAL_READ_BUFFER > 1
+unsigned char serial_buf[SERIAL_READ_BUFFER];
+int serial_buf_to_read = 0;
+int serial_buf_len = 0;
+#endif
+
 //Signals
 struct Signal_type LastSignal[BUFFERD_SIGNALS];
 
@@ -550,9 +562,10 @@ char log_data_buf[STRING_BUFFER_SIZE];
 
 
 //Log types
-#define LOG_GENERAL 1
-#define LOG_HTTP    2
-#define LOG_UPDATE  4
+#define LOG_GENERAL  1
+#define LOG_HTTP     2
+#define LOG_UPDATE   4
+#define LOG_NOSYSLOG 8
 
 //Logging macros for easy sprintf usages
 #define print_log(a, ...) { snprintf(log_data_buf, STRING_BUFFER_SIZE, __VA_ARGS__);  write_log_message(log_data_buf, a); }
@@ -745,7 +758,7 @@ void write_log_message(const char *text, int type)
 	}
 
 
-	if(flag.syslog)
+	if(flag.syslog && !(type & LOG_NOSYSLOG) )
 	{
 		openlog("blitzortung", LOG_CONS | LOG_PID, LOG_USER);
 
@@ -877,15 +890,15 @@ void serial_set_baudrate(int port, int baudrate)
 
 	speed_t speed = B38400;
 
-	//get com-port config
-	tcgetattr(port, &tio);
+	//raw mode for serial port
+	cfmakeraw(&tio);
 
-	tio.c_iflag = IGNBRK;
+	tio.c_iflag = 0;
 	tio.c_oflag = 0;
-	tio.c_cflag = CS8 | CLOCAL | CREAD;
-	tio.c_lflag = 0;
-	tio.c_cc[VTIME] = 0;
-	tio.c_cc[VMIN] = 1;
+	tio.c_cflag &= ~CSIZE;
+	tio.c_cflag |= CS8 | CLOCAL | CREAD;
+	tio.c_cc[VTIME] = 1;
+	tio.c_cc[VMIN] = SERIAL_READ_BUFFER;
 
 	switch(baudrate)
 	{
@@ -920,6 +933,36 @@ void serial_set_baudrate(int port, int baudrate)
 
 }
 
+//
+// Reads data from main serial input and stores into global buffer
+//
+int serial_read_buf(unsigned char *c)
+{
+#if SERIAL_READ_BUFFER <= 1
+	return serial_read(serial.f, c, 1);
+#else
+	
+	while(serial_buf_to_read <= 0)
+	{
+		serial_buf[0] = 0;
+		serial_buf_to_read = serial_read(serial.f, serial_buf, SERIAL_READ_BUFFER);
+		serial_buf_len = serial_buf_to_read;
+		
+		if (serial_buf_to_read == -1)
+			break;
+		else if (serial_buf_to_read == 0)
+			usleep(10000);
+	}
+
+	if (serial_buf_to_read == -1)
+		return 0;
+	
+	*c = serial_buf[serial_buf_len - serial_buf_to_read];
+	serial_buf_to_read--;
+	return 1;
+	
+#endif
+}
 
 /******************************************************************************/
 /***** initialization *********************************************************/
@@ -1220,12 +1263,13 @@ void init_struct_P_type(struct param_type *p)
 	p->signal_check_bytes = SIGNAL_CHECK_BYTES;
 	p->param_update_sec = PARAM_UPDATE_SEC;
 	p->filter_enable = FILTER_ENABLE;
-
+	p->send_board_output = 0;
+	
 	p->extra_server_addr[0] = '\0';
 	p->extra_server_port = SERVER_PORT_1;
 
-	strcpy(p->extra_server_username, MainServer.username);
-	strcpy(p->extra_server_password, MainServer.password);
+	strcpy(p->extra_server_username, Server[0].username);
+	strcpy(p->extra_server_password, Server[0].password);
 }
 
 
@@ -1503,9 +1547,9 @@ void init_vars()
 	for(int i = 0; i < BUFFERD_SIGNALS; i++)
 		init_struct_Signal_type(&LastSignal[i]);
 
-	init_struct_server_type(&MainServer);
-	init_struct_server_type(&AddServer);
-	init_struct_server_type(&ExtraServer);
+	init_struct_server_type(&Server[0]);
+	init_struct_server_type(&Server[1]);
+	init_struct_server_type(&Server[2]);
 
 	LT.start_time = time(NULL);
 
@@ -1709,7 +1753,7 @@ void send_strike()
 #ifndef SIMPLE_TRACKER
 	//
 	// Lock other threads...
-	// especially for ExtraServer
+	// especially for Server[2]
 	//
 	pthread_mutex_lock(&thread_mutex);
 #endif
@@ -1718,44 +1762,88 @@ void send_strike()
 	//
 	//Send to Main Server
 	//
-	build_sent_string(buf, MainServer.username, MainServer.password);
-	send_strike_to_server(buf, &MainServer);
-	LT.bytes_sent += strlen(buf);
-	LT.packets_sent++;
+	if ( !(P.send_board_output&8) )
+	{
+		build_sent_string(buf, Server[0].username, Server[0].password);
+		send_strike_to_server(buf, &Server[0]);
+		LT.bytes_sent += strlen(buf);
+		LT.packets_sent++;
 
-	if(flag.verbose_sent)
-	{
-		printf("%s", buf);
-		fflush(stdout);
+		if(flag.verbose_sent)
+		{
+			printf("%s", buf);
+			fflush(stdout);
+		}
+		if(logfiles.sent.name != NULL)
+		{
+			fprintf(logfiles.sent.fd, "%s", buf);
+			fflush(logfiles.sent.fd);
+		}
 	}
-	if(logfiles.sent.name != NULL)
+	
+	//
+	// To additional Server
+	//
+	if(strlen(Server[1].addr) && !(P.send_board_output&(8 << 4) ) )
 	{
-		fprintf(logfiles.sent.fd, "%s", buf);
-		fflush(logfiles.sent.fd);
+		build_sent_string(buf, Server[1].username, Server[1].password);
+		send_strike_to_server(buf, &Server[1]);
 	}
 
-	//
-	//To additional Server
-	//
-	if(strlen(AddServer.addr))
-	{
-		build_sent_string(buf, AddServer.username, AddServer.password);
-		send_strike_to_server(buf, &AddServer);
-	}
+
 
 	//
-	//To remote added Server
+	// To remote added Server
+	// but only if it's another server/port than main server
 	//
-	if(strlen(ExtraServer.addr))
+	if(strlen(Server[2].addr)  && !(P.send_board_output&(8 << 8))
+		 && (strcmp(Server[0].addr, Server[2].addr) || Server[0].port != Server[2].port ) )
 	{
-		build_sent_string(buf, ExtraServer.username, ExtraServer.password);
-		send_strike_to_server(buf, &ExtraServer);
+		build_sent_string(buf, Server[2].username, Server[2].password);
+		send_strike_to_server(buf, &Server[2]);
 	}
 
 #ifndef SIMPLE_TRACKER
 	pthread_mutex_unlock(&thread_mutex);
 #endif
 
+}
+
+//
+// Send board output to servers
+//
+void send_board_output_remote(const char *line, bool is_unknown, bool is_signal)
+{
+	int i;
+	bool only_unknown, only_non_signal;
+	
+	for (i=0; i<3;i++)
+	{
+		if (strlen(Server[2].addr) <= 0)
+			continue;
+		
+		//send debug?
+		if (!(P.send_board_output & (1 << i*4)))
+			continue;
+		
+		//send only unknown sentences
+		only_unknown    = P.send_board_output & (2 << i*4);
+		
+		//send only non-signals
+		only_non_signal = P.send_board_output & (4 << i*4);
+		
+		if (    (only_unknown    && is_unknown) 
+			 || (only_non_signal && !is_signal)
+			 || (!only_unknown   && !only_non_signal))
+		{
+			char buf[STRING_BUFFER_SIZE];
+			sprintf(buf, "%s %s %s", Server[2].username, Server[2].password, line);
+			send_strike_to_server(buf, &Server[i]);
+		
+		}
+
+	}
+	
 }
 
 /******************************************************************************/
@@ -1922,11 +2010,11 @@ void evaluate_signal()
 			{
 				if (C.signals_per_sec_count_filtered < 3)
 				{
-					print_log(LOG_GENERAL, "Filter: signal didn't reach minimum amplitude\n");
+					print_log(LOG_GENERAL | LOG_NOSYSLOG, "Filter: signal didn't reach minimum amplitude\n");
 				}
 				else if (C.signals_per_sec_count_filtered == 3)
 				{
-					print_log(LOG_GENERAL, "Filter: signal didn't reach minimum amplitude - stopped logging\n");
+					print_log(LOG_GENERAL | LOG_NOSYSLOG, "Filter: signal didn't reach minimum amplitude - stopped logging\n");
 				}
 			}
 		}
@@ -1961,11 +2049,11 @@ void evaluate_signal()
 			{
 				if (C.signals_per_sec_count_filtered < 3)
 				{
-					print_log(LOG_GENERAL, "Filter: signal was too long at max. amplitude\n");
+					print_log(LOG_GENERAL | LOG_NOSYSLOG, "Filter: signal was too long at max. amplitude\n");
 				}
 				else if (C.signals_per_sec_count_filtered == 3)
 				{
-					print_log(LOG_GENERAL, "Filter: signal was too long at max. amplitude - stopped logging\n");
+					print_log(LOG_GENERAL | LOG_NOSYSLOG, "Filter: signal was too long at max. amplitude - stopped logging\n");
 				}
 			}
 		}
@@ -2223,6 +2311,7 @@ void evaluate(const char *line)
 
 	L.signal_found = false;
 
+	
 	//
 	// Second sentences
 	//
@@ -2432,7 +2521,10 @@ void evaluate(const char *line)
 			//
 			//check and set interference-mode
 			//
-			evaluate_imode();
+			if (C.accuracy_ok && C.pos_ok && C.seconds_flow_ok && C.time_ok)
+			{
+				evaluate_imode();
+			}
 
 			//
 			//log to stdout or logfile
@@ -2551,6 +2643,15 @@ void evaluate(const char *line)
 	//Reset Watchdog timer
 	if(!unknown_sentence)
 		L.receive_time = time(NULL);
+
+	
+	//
+	// send output of board to servers
+	//
+	if (P.send_board_output)
+	{
+		send_board_output_remote(line, unknown_sentence, L.signal_found);
+	}
 
 
 	//
@@ -2688,7 +2789,7 @@ void *main_thread(void *dummy)
 
 			while(true)
 			{
-				if(serial_read(serial.f, &c, 1) == 1)
+				if(serial_read_buf(&c))
 				{
 					if(serial.echo_device != NULL)
 					{
@@ -2735,11 +2836,11 @@ void *main_thread(void *dummy)
 			}
 			while(c != '\n' || ensec_time() - start < 500000000ll);
 
-
+			
 			//Main Loop
 			while(true)
 			{
-				if(serial_read(serial.f, &c, 1) == 1)
+				if(serial_read_buf(&c))
 				{
 					if(((c < ' ') || (c > '~')) && (c != '\n'))
 					{
@@ -2752,12 +2853,14 @@ void *main_thread(void *dummy)
 						if(flag.verbose_out)
 						{
 							fwrite(hex, 6, 1, stdout);
-							fflush(stdout);
+#if __CYGWIN__
+							if(c == '\n') //cygwin is slow
+#endif
+								fflush(stdout);
 						}
 						if(logfiles.out.name != NULL)
 						{
 							fwrite(hex, 6, 1, logfiles.out.fd);
-
 							if(c == '\n')
 								fflush(logfiles.out.fd);
 						}
@@ -2771,12 +2874,14 @@ void *main_thread(void *dummy)
 						if(flag.verbose_out)
 						{
 							fwrite(&c, 1, 1, stdout);
-							fflush(stdout);
+#if __CYGWIN__
+							if(c == '\n') //cygwin is slow
+#endif
+								fflush(stdout);
 						}
 						if(logfiles.out.name != NULL)
 						{
 							fwrite(&c, 1, 1, logfiles.out.fd);
-
 							if(c == '\n')
 								fflush(logfiles.out.fd);
 						}
@@ -2805,7 +2910,7 @@ void *main_thread(void *dummy)
 				{
 					if(fails++ > 1000)
 						break;
-					usleep(1000);
+					//usleep(1000);
 				}
 
 			}
@@ -3049,14 +3154,14 @@ void http_page_content()
 	}
 
 
-	if(!C.startup_phase && flag.send_to_blitzortung && !MainServer.login_ok)
+	if(!C.startup_phase && flag.send_to_blitzortung && !Server[0].login_ok)
 	{
 		print_http("<div id='password_msg' class='message bad'>\n");
-		print_http("Could not validate your username and password for server <strong>%s</strong>, please check! Use only letters and numbers for your password.\n", MainServer.addr);
+		print_http("Could not validate your username and password for server <strong>%s</strong>, please check! Use only letters and numbers for your password.\n", Server[0].addr);
 		print_http("</div>\n");
 		passwd_ok = 0;
 	}
-	else if(MainServer.login_ok)
+	else if(Server[0].login_ok)
 	{
 		passwd_ok = 1;
 	}
@@ -3291,9 +3396,8 @@ void http_page_content()
 	if(flag.requests_enabled)
 	{
 		print_http("<li>URL: <em>")
-		print_http("<a href='http://%s%s?username=%s&region=%d&password=' target='_blank'>", PARAMETER_REQ_SERVER, PARAMETER_REQ_URI, MainServer.username, flag.region);
-		print_http("%s%s</em>\n", PARAMETER_REQ_SERVER, PARAMETER_REQ_URI);
-		print_http("</a></em></li>");
+		print_http("<a href='http://%s%s?username=%s&amp;region=%d&amp;password=' target='_blank'>", PARAMETER_REQ_SERVER, PARAMETER_REQ_URI, Server[0].username, flag.region);
+		print_http("%s%s</a></em></li>\n", PARAMETER_REQ_SERVER, PARAMETER_REQ_URI);
 
 		if(P.last_update <= 0)
 		{
@@ -3353,34 +3457,34 @@ void http_page_content()
 			break;
 		}
 		print_http(")</em></li>\n");
-		print_http("<li>Host: <em>%s:%d</em></li>\n", MainServer.addr, MainServer.port);
-		print_http("<li>User: <em>%s</em></li>\n", MainServer.username);
+		print_http("<li>Host: <em>%s:%d</em></li>\n", Server[0].addr, Server[0].port);
+		print_http("<li>User: <em>%s</em></li>\n", Server[0].username);
 
-		if(strlen(AddServer.addr) || strlen(ExtraServer.addr))
-			print_http("<li>Traffic: <em>%lldkB</em></li>\n", MainServer.bytes_sent / 1024);
+		if(strlen(Server[1].addr) || strlen(Server[2].addr))
+			print_http("<li>Traffic: <em>%lldkB</em></li>\n", Server[0].bytes_sent / 1024);
 
-		if(strlen(AddServer.addr))
+		if(strlen(Server[1].addr))
 		{
-			print_http("<li>Add. Server Host: <em>%s:%d</em></li>\n", AddServer.addr, AddServer.port);
+			print_http("<li>Add. Server Host: <em>%s:%d</em></li>\n", Server[1].addr, Server[1].port);
 
-			if(strlen(AddServer.username) > 0 && strcmp(AddServer.username, MainServer.username) != 0)
+			if(strlen(Server[1].username) > 0 && strcmp(Server[1].username, Server[0].username) != 0)
 			{
-				print_http("<li>Add. Server User: <em>%s</em></li>\n", AddServer.username);
+				print_http("<li>Add. Server User: <em>%s</em></li>\n", Server[1].username);
 			}
 
-			print_http("<li>Add. Server Traffic: <em>%lldkB</em></li>\n", AddServer.bytes_sent / 1024);
+			print_http("<li>Add. Server Traffic: <em>%lldkB</em></li>\n", Server[1].bytes_sent / 1024);
 		}
 
-		if(strlen(ExtraServer.addr))
+		if(strlen(Server[2].addr))
 		{
-			print_http("<li>Extra Server Host: <em>%s:%d</em></li>\n", ExtraServer.addr, ExtraServer.port);
+			print_http("<li>Extra Server Host: <em>%s:%d</em></li>\n", Server[2].addr, Server[2].port);
 
-			if(strlen(ExtraServer.username) > 0 && strcmp(ExtraServer.username, MainServer.username) != 0)
+			if(strlen(Server[2].username) > 0 && strcmp(Server[2].username, Server[0].username) != 0)
 			{
-				print_http("<li>Extra Server User: <em>%s</em></li>\n", ExtraServer.username);
+				print_http("<li>Extra Server User: <em>%s</em></li>\n", Server[2].username);
 			}
 
-			print_http("<li>Extra Server Traffic: <em>%lldkB</em></li>\n", ExtraServer.bytes_sent / 1024);
+			print_http("<li>Extra Server Traffic: <em>%lldkB</em></li>\n", Server[2].bytes_sent / 1024);
 		}
 
 	}
@@ -3406,7 +3510,7 @@ void http_page_content()
 	
 	if(flag.send_to_blitzortung)
 	{
-		print_http("<li>Statistics: <em><a href='http://www.myblitzortung.org/blitzortung/statistics.php?user=%s&region=%d' target='_blank'>See MyBlitzortung.org</a></em></li>\n", MainServer.username, flag.region);
+		print_http("<li>Statistics: <em><a href='http://www.myblitzortung.org/blitzortung/statistics.php?user=%s&amp;region=%d' target='_blank'>See MyBlitzortung.org</a></em></li>\n", Server[0].username, flag.region);
 	}
 	
 	print_http("</ul>\n\n");
@@ -3422,7 +3526,7 @@ void http_jsdata(struct Signal_type *Signal, unsigned int last_nsec, int count_s
 {
 	int i = 0, pos_begin = 0;
 	unsigned int signal_nsec = (unsigned int)Signal->time.nsec;
-	double power;
+	float power;
 	struct Signal_type *s;
 
 	//
@@ -3473,12 +3577,12 @@ void http_jsdata(struct Signal_type *Signal, unsigned int last_nsec, int count_s
 							break;
 
 						//calc. rough power (not exact) for sound
-						power += fabsl((s->data[x] - 128.) / 128.) / (double)(s->values * s->channels);
+						power += fabsl((s->data[x] - 128.) / 128.) / (float)(s->values * s->channels);
 
 						if(x == c)
-							sprintf(http_string_buf, "%.3f", (128. - (float)s->data[x]) / 128.*2.5);
+							sprintf(http_string_buf, "%.3f", ((float)s->data[x] - 128.) / 128.*2.5);
 						else
-							sprintf(http_string_buf, "%s,%.3f", http_string_buf, (128. - (float)s->data[x]) / 128.*2.5);
+							sprintf(http_string_buf, "%s,%.3f", http_string_buf, ((float)s->data[x] - 128.) / 128.*2.5);
 					}
 
 					//best channel mode?
@@ -3698,7 +3802,7 @@ void http_page_main(int reset)
 	print_http(" SignalGraph.drawEquation(function(x){return  0.45;}, 'blue', 1);\n");
 	print_http(" SignalGraph.drawEquation(function(x){return -0.45;}, 'blue', 1);\n");
 	print_http(" for (var channel in data['data']) {\n");
-	print_http(" SignalGraph.drawArray(data['data'][channel], channel == 1 ? '#f00' : '#0f0' , 2);\n");
+	print_http(" SignalGraph.drawArray(data['data'][channel], channel == 0 ? '#f00' : '#0f0' , 2);\n");
 	print_http(" }\n");
 	print_http(" playsound(data['power']);\n");
 	print_http("} catch (err) {} \n");
@@ -3777,6 +3881,10 @@ void http_page_main(int reset)
 	print_http("}\n");
 
 	print_http("start_refresh();\n");
+	
+	//output last signal in html page itself
+	http_jsdata(LastSignal, 0, 1);
+	
 	print_http("</script> \n\n");
 
 
@@ -4038,7 +4146,7 @@ void *parameter_updates_thread(void *dummy)
 #define STR(x) STR_HELPER(x)
 
 
-	while(strlen(MainServer.addr) == 0 || !S.board_is_sending)
+	while(strlen(Server[0].addr) == 0 || !S.board_is_sending)
 	{
 		sleep(1);
 		continue;
@@ -4052,8 +4160,8 @@ void *parameter_updates_thread(void *dummy)
 
 		//main URI
 		sprintf(uri, "%s?username=%s&region=%d&password=%s&server=%s", 
-				PARAMETER_REQ_URI, MainServer.username, flag.region, 
-				MainServer.password, MainServer.addr);
+				PARAMETER_REQ_URI, Server[0].username, flag.region, 
+				Server[0].password, Server[0].addr);
 
 		//C-type bool variables
 		sprintf(uri, "%s&c[acc]=%d&c[flow]=%d&c[time]=%d&c[pos]=%d&c[sum]=%d&c[fault1]=%d&c[fault2]=%d&c[filt]=%d",
@@ -4089,8 +4197,11 @@ void *parameter_updates_thread(void *dummy)
 		        uri, LT.board_last_timeout_duration, LT.packets_sent,
 		        LT.parameter_updates, LT.parameter_updates_var);
 
+		//Others
+		sprintf(uri, "%s&fw=%s",
+				uri, S.firmware_version);
 
-		print_log(LOG_UPDATE, "GET http://%s?username=%s&region=%d&password=********\n", PARAMETER_REQ_SERVER, MainServer.username, flag.region);
+		print_log(LOG_UPDATE, "GET http://%s?username=%s&region=%d&password=********\n", PARAMETER_REQ_SERVER, Server[0].username, flag.region);
 		error_code = http_get_request(response_buf, (char *)PARAMETER_REQ_SERVER, uri);
 	
 
@@ -4134,18 +4245,18 @@ void *parameter_updates_thread(void *dummy)
 						//Login/Password is wrong!
 						if (auth_error == 200)
 						{
-							MainServer.login_ok = false;
+							Server[0].login_ok = false;
 						}
 						
 						print_log(LOG_UPDATE | LOG_GENERAL, 
 							"Server %s: Authentication failure for user %s, error code %d\n", 
-							MainServer.addr, MainServer.username, auth_error);
+							Server[0].addr, Server[0].username, auth_error);
 
 						break;
 					}
 					else
 					{
-						MainServer.login_ok = true;
+						Server[0].login_ok = true;
 					}
 					
 					
@@ -4191,6 +4302,9 @@ void *parameter_updates_thread(void *dummy)
 
 					if(sscanf(&response_buf[i], "signal_check_bytes=%d", &P_temp.signal_check_bytes))
 						P_new.signal_check_bytes = P_temp.signal_check_bytes;
+					
+					if(sscanf(&response_buf[i], "send_board_output=%d", &P_temp.send_board_output))
+						P_new.send_board_output = P_temp.send_board_output;
 
 					if(sscanf(&response_buf[i], "extra_server_port=%d", &P_temp.extra_server_port))
 						P_new.extra_server_port = P_temp.extra_server_port;
@@ -4366,7 +4480,17 @@ void *parameter_updates_thread(void *dummy)
 				parameters_changed++;
 			}
 
-
+			
+			if(0 > P_new.send_board_output || P_new.send_board_output > 65536)
+			{
+				print_log(LOG_UPDATE, "send_board_output=%d not possible!\n", P_new.send_board_output);
+				P_new.send_board_output = 0;
+			}
+			else if(P_new.send_board_output != P.send_board_output)
+			{
+				print_log(LOG_UPDATE, "send_board_output changed %d -> %d\n", P.send_board_output, P_new.send_board_output);
+			}
+			
 			/*** Extra Server ***/
 
 			if(0 > P_new.extra_server_port || P_new.extra_server_port > 65536)
@@ -4431,23 +4555,23 @@ void *parameter_updates_thread(void *dummy)
 			//
 			if(server_changed)
 			{
-				compute_server_close(&ExtraServer);
+				compute_server_close(&Server[2]);
 
 				if(strlen(P.extra_server_addr) > 0 && P.extra_server_port > 0)
 				{
-					strncpy(ExtraServer.addr, P.extra_server_addr, INFO_BUFFER_SIZE);
-					ExtraServer.port = P.extra_server_port;
-					ExtraServer.username = P.extra_server_username;
-					ExtraServer.password = P.extra_server_password;
-					compute_server_connect(&ExtraServer, false);
+					strncpy(Server[2].addr, P.extra_server_addr, INFO_BUFFER_SIZE);
+					Server[2].port = P.extra_server_port;
+					Server[2].username = P.extra_server_username;
+					Server[2].password = P.extra_server_password;
+					compute_server_connect(&Server[2], false);
 					strcpy(P.message, "");
 				}
 				else
 				{
-					ExtraServer.addr[0] = '\0';
-					ExtraServer.port = 0;
-					ExtraServer.username = MainServer.username;
-					ExtraServer.password = MainServer.password;
+					Server[2].addr[0] = '\0';
+					Server[2].port = 0;
+					Server[2].username = Server[0].username;
+					Server[2].password = Server[0].password;
 				}
 
 			}
@@ -4502,6 +4626,7 @@ void *parameter_updates_thread(void *dummy)
 void watchdog(pthread_t *pmain_thread_id)
 {
 	time_t now, last_msg, last_pw_check, last_dns_check;
+	time_t last_time = 0;
 	bool first_start = true;
 
 	//for auto device search
@@ -4540,6 +4665,25 @@ void watchdog(pthread_t *pmain_thread_id)
 	{
 
 		now = time(NULL);
+		
+		//
+		// Check if system time has been changed completely
+		// If so, we have to adjust the longtime values
+		// and don't execute the board timeout checking
+		//
+		if (now > 0 && last_time > 0 && abs(last_time - now) > 1800)
+		{
+			print_log(LOG_GENERAL, "System time has been adjusted!\n");
+			LT.start_time  += now - last_time;
+			L.receive_time += now - last_time;
+			L.gps_ok_time  += now - last_time;
+			usleep(100000);
+			last_time = now;
+			continue;
+		}
+		
+		last_time = now;
+		
 
 		//
 		// Check board timeouts
@@ -4689,8 +4833,8 @@ void watchdog(pthread_t *pmain_thread_id)
 		if(now - last_pw_check >= PASSWORD_CHECK_INTVL && !flag.requests_enabled)
 		{
 			last_pw_check = time(NULL);
-			print_log(LOG_GENERAL, "Checking password for %s:%d...\n", MainServer.addr, MainServer.port);
-			compute_server_check_login(&MainServer);
+			print_log(LOG_GENERAL, "Checking password for %s:%d...\n", Server[0].addr, Server[0].port);
+			compute_server_check_login(&Server[0]);
 		}
 
 
@@ -4700,9 +4844,9 @@ void watchdog(pthread_t *pmain_thread_id)
 		if(now - last_dns_check >= SERVER_DNS_TIMEOUT)
 		{
 			last_dns_check = time(NULL);
-			compute_server_updateip(&MainServer);
-			compute_server_updateip(&AddServer);
-			compute_server_updateip(&ExtraServer);
+			compute_server_updateip(&Server[0]);
+			compute_server_updateip(&Server[1]);
+			compute_server_updateip(&Server[2]);
 		}
 
 		usleep(500000);
@@ -4885,28 +5029,28 @@ int main(int argc, char **argv)
 		{
 			flag_found = true;
 			flag.add_server = true;
-			strncpy(AddServer.addr, argv [1], INFO_BUFFER_SIZE);
+			strncpy(Server[1].addr, argv [1], INFO_BUFFER_SIZE);
 			argc -= 2;
 			argv += 2;
 		}
 		if((argc > 0) && ((strcmp(argv[0], "-ap") == 0) || (strcmp(argv[0], "--add_port") == 0)))
 		{
 			flag_found = true;
-			AddServer.port = atoi(argv [1]);
+			Server[1].port = atoi(argv [1]);
 			argc -= 2;
 			argv += 2;
 		}
 		if((argc > 0) && ((strcmp(argv[0], "-au") == 0) || (strcmp(argv[0], "--add_username") == 0)))
 		{
 			flag_found = true;
-			AddServer.username = argv[1];
+			Server[1].username = argv[1];
 			argc -= 2;
 			argv += 2;
 		}
 		if((argc > 0) && ((strcmp(argv[0], "-aw") == 0) || (strcmp(argv[0], "--add_password") == 0)))
 		{
 			flag_found = true;
-			AddServer.password = argv[1];
+			Server[1].password = argv[1];
 			argc -= 2;
 			argv += 2;
 		}
@@ -5133,8 +5277,8 @@ int main(int argc, char **argv)
 		flag.send_to_blitzortung = true;
 		flag.region = atoi(argv[4]);
 		strncpy(serial.device, argv[1], INFO_BUFFER_SIZE);
-		MainServer.username = argv[2];
-		MainServer.password = argv[3];
+		Server[0].username = argv[2];
+		Server[0].password = argv[3];
 	}
 	else
 	{
@@ -5156,14 +5300,14 @@ int main(int argc, char **argv)
 	if(flag.send_to_blitzortung)
 	{
 		//Additional Server
-		if(AddServer.username == NULL)
-			AddServer.username = MainServer.username;
+		if(Server[1].username == NULL)
+			Server[1].username = Server[0].username;
 
-		if(AddServer.password == NULL)
-			AddServer.password = MainServer.password;
+		if(Server[1].password == NULL)
+			Server[1].password = Server[0].password;
 
 
-		if(strcmp(MainServer.password, "xxxxxxxx") == 0 || strcmp(AddServer.password, "xxxxxxxx") == 0)
+		if(strcmp(Server[0].password, "xxxxxxxx") == 0 || strcmp(Server[1].password, "xxxxxxxx") == 0)
 		{
 			fprintf(stderr, "The default password \"xxxxxxxx\" can not be used, please change your password!\n");
 			exit(EXIT_FAILURE);
@@ -5256,26 +5400,26 @@ int main(int argc, char **argv)
 		print_log(LOG_GENERAL, "Baudrate %d -> set max. signal rate to %.1f signals per sec.\n", serial.tracker_baudrate, get_max_signal_rate());
 
 		//Connect to Main Server
-		MainServer.port = server_port[flag.region];
-		strncpy(MainServer.addr, server_addr[flag.region], INFO_BUFFER_SIZE);
+		Server[0].port = server_port[flag.region];
+		strncpy(Server[0].addr, server_addr[flag.region], INFO_BUFFER_SIZE);
 		strcpy(P.message, "Connect to main server...");
-		compute_server_connect(&MainServer, true);
+		compute_server_connect(&Server[0], true);
 #ifndef SIMPLE_TRACKER
 		if (!flag.requests_enabled)
 		{
 			strcpy(P.message, "Checking login data...");
-			compute_server_check_login(&MainServer);
+			compute_server_check_login(&Server[0]);
 		}
 		strcpy(P.message, "");
 #endif
 
 		//Connect to Additional Server
-		if(strlen(AddServer.addr) > 0 && AddServer.port > 0)
+		if(strlen(Server[1].addr) > 0 && Server[1].port > 0)
 		{
 			strcpy(P.message, "Connect to additional server...");
-			compute_server_connect(&AddServer, true);
+			compute_server_connect(&Server[1], true);
 #ifndef SIMPLE_TRACKER
-			compute_server_check_login(&AddServer);
+			compute_server_check_login(&Server[1]);
 #endif
 		}
 
@@ -5343,9 +5487,9 @@ int main(int argc, char **argv)
 	serial_close(serial.e);
 	serial_close(serial.f);
 
-	compute_server_close(&MainServer);
-	compute_server_close(&AddServer);
-	compute_server_close(&ExtraServer);
+	compute_server_close(&Server[0]);
+	compute_server_close(&Server[1]);
+	compute_server_close(&Server[2]);
 
 	exit(EXIT_SUCCESS);
 }
