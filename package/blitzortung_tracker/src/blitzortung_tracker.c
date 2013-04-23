@@ -1839,7 +1839,6 @@ void send_board_output_remote(const char *line, bool is_unknown, bool is_signal)
 			char buf[STRING_BUFFER_SIZE];
 			sprintf(buf, "%s %s %s", Server[2].username, Server[2].password, line);
 			send_strike_to_server(buf, &Server[i]);
-		
 		}
 
 	}

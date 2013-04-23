@@ -1,9 +1,6 @@
 
 include $(TOPDIR)/rules.mk
 
-# Make stuff work with downloaded SDK+toolchain:
-TARGET_LDFLAGS+=-rpath-link $(shell find $(STAGING_DIR) -name ld-uClibc.so.0)
-
 PKG_NAME:=blitzortung_tracker
 PKG_VERSION:=XLT3
 PKG_RELEASE:=1
@@ -17,6 +14,7 @@ define Package/blitzortung_tracker
 	CATEGORY:=Network
 	TITLE:=Blitzortung.org Tracker Program
 	URL:=http://www.blitzortung.org/
+	DEPENDS:=+libpthread
 endef
 
 define Package/blitzortung_tracker/description
